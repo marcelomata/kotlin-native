@@ -22,6 +22,7 @@
 #include <limits.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <string.h>
 
 typedef struct _CSTypeRef {
   unsigned long type;
@@ -102,6 +103,7 @@ bool TryInitializeCoreSymbolication() {
 
 extern "C" struct SourceInfo Kotlin_getSourceInfo(void* addr) {
   __block SourceInfo result = { .fileName = nullptr, .lineNumber = -1, .column = -1 };
+  __block bool continueUpdateResult = true;
 
   static bool csIsAvailable = TryInitializeCoreSymbolication();
 
@@ -118,18 +120,35 @@ extern "C" struct SourceInfo Kotlin_getSourceInfo(void* addr) {
     CSSymbolForeachSourceInfo(symbol,
       ^(CSSourceInfoRef ref) {
           uint32_t lineNumber = CSSourceInfoGetLineNumber(ref);
+          if (lineNumber == 0)
+            return 0;
           CSRange range = CSSourceInfoGetRange(ref);
-          if (lineNumber != 0
-              && address >= range.location
-              && address < range.location + range.length) {
-            const char* fileName = CSSourceInfoGetPath(ref);
-            if (fileName != nullptr) {
+          const char* fileName = CSSourceInfoGetPath(ref);
+          if (fileName != nullptr) {
+            if (result.fileName == nullptr) {
+              result.fileName = fileName;
+            }
+            /**
+             * We need to change API fo Kotlin_getSourceInfo to return information about inlines,
+             * but for a moment we have to track that we updating result info _only_ for upper level or _inlined at_ and
+             * don't go deeper. at deeper level we check only that we at the right _inlined at_ position.
+             */
+            if (continueUpdateResult
+                && strcmp(result.fileName, fileName) == 0) {
               result.fileName = fileName;
               result.lineNumber = lineNumber;
               result.column = CSSourceInfoGetColumn(ref);
             }
-       }
-       return 0;
+          }
+          /**
+           * if found right inlined function don't bother with
+           * updating high level inlined _at_ source info
+           */
+          if (continueUpdateResult &&  (address >= range.location
+                                        && address < range.location + range.length))
+             continueUpdateResult = false;
+
+          return 0;
    });
   }
   return result;
