@@ -121,9 +121,16 @@ bool TryInitializeCoreSymbolication() {
 
 } // namespace
 
+typedef struct {
+  const char * fileName;
+  int start;
+  int end;
+} SymbolSourceInfoLimits;
+
 extern "C" struct SourceInfo Kotlin_getSourceInfo(void* addr) {
   __block SourceInfo result = { .fileName = nullptr, .lineNumber = -1, .column = -1 };
   __block bool continueUpdateResult = true;
+  __block SymbolSourceInfoLimits limits = {.start = -1, .end = -1};
 
   static bool csIsAvailable = TryInitializeCoreSymbolication();
 
@@ -139,6 +146,28 @@ extern "C" struct SourceInfo Kotlin_getSourceInfo(void* addr) {
     SYM_LOG("Kotlin_getSourceInfo: address: %p\n", addr);
     SYM_DUMP(symbol);
 
+    /**
+     * ASSUMPTION: we assume that the _first_ and the _last_ source infos should belong to real function(symbol) the rest might belong to
+     * inlined functions.
+     */
+    CSSymbolForeachSourceInfo(symbol,
+          ^(CSSourceInfoRef ref) {
+           uint32_t lineNumber = CSSourceInfoGetLineNumber(ref);
+           if (lineNumber == 0)
+             return 0;
+           if (limits.start == -1) {
+              limits.start = lineNumber;
+              limits.fileName = CSSourceInfoGetPath(ref);
+           } else
+              limits.end = lineNumber;
+           return 0;
+    });
+
+
+    SYM_LOG("limits: {%s %d..%d}\n", limits.fileName, limits.start, limits.end);
+
+
+    result.fileName = limits.fileName;
 
     CSSymbolForeachSourceInfo(symbol,
       ^(CSSourceInfoRef ref) {
@@ -148,21 +177,17 @@ extern "C" struct SourceInfo Kotlin_getSourceInfo(void* addr) {
           SYM_DUMP(ref);
           CSRange range = CSSourceInfoGetRange(ref);
           const char* fileName = CSSourceInfoGetPath(ref);
-          if (fileName != nullptr) {
-            if (result.fileName == nullptr) {
-              result.fileName = fileName;
-            }
-            /**
-             * We need to change API fo Kotlin_getSourceInfo to return information about inlines,
-             * but for a moment we have to track that we updating result info _only_ for upper level or _inlined at_ and
-             * don't go deeper. at deeper level we check only that we at the right _inlined at_ position.
-             */
-            if (continueUpdateResult
-                && strcmp(result.fileName, fileName) == 0) {
-              result.fileName = fileName;
-              result.lineNumber = lineNumber;
-              result.column = CSSourceInfoGetColumn(ref);
-            }
+          /**
+           * We need to change API fo Kotlin_getSourceInfo to return information about inlines,
+           * but for a moment we have to track that we updating result info _only_ for upper level or _inlined at_ and
+           * don't go deeper. at deeper level we check only that we at the right _inlined at_ position.
+           */
+          if (continueUpdateResult
+              && strcmp(limits.fileName, fileName) == 0
+              && lineNumber >= limits.start
+              && lineNumber <= limits.end) {
+            result.lineNumber = lineNumber;
+            result.column = CSSourceInfoGetColumn(ref);
           }
           /**
            * if found right inlined function don't bother with
